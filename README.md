@@ -1,11 +1,11 @@
 # compatctl
 Unify input and convert controller type, currently emulating DS4 via ViGEmBus
 
-# supported device
+# Supported device
 Legion Go
 
 # Todo
 merge with XInput/DirectInput
 
-#Build
+# Build
 Just `cargo build --release` on Windows
