@@ -5,10 +5,11 @@ Unify input and convert controller type, currently emulating DS4 via ViGEmBus
 Legion Go
 
 # Todo
-merge with XInput/DirectInput
+Vibration relay
+DirectInput(No existing working lib)
 
 # Build and Run
-Just `cargo build --release` on Windows, need ViGEmBus driver to run.
+Just `cargo build --release` on Windows(or use target), need ViGEmBus driver to run.
 
 # Known issue
-Stop working after device sleep, but SensorExplorer also stops reading data. So this is either a Lenovo or AMD problem, I can't fix it.
+Motion sensors stop working after device sleep, but SensorExplorer also stops reading data. So this is either a Lenovo or AMD driver problem, I can't fix it.
