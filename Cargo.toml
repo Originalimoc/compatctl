@@ -1,0 +1,18 @@
+[package]
+name = "compatctl"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+windows = { version = "0", features = ["Devices_Sensors"] }
+tokio = { version = "1", features = ["full"] }
+vigem-client = { git = "https://github.com/Originalimoc/vigem-sdk-mc", features = ["unstable_xtarget_notification"] }
+#vigem = { git = "https://github.com/TheRadioGuy/vigem" }
+
+[profile.release]
+codegen-units = 1
+lto = true
+panic = "abort"
+strip = true
