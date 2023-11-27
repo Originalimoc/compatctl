@@ -1,6 +1,6 @@
 [package]
 name = "compatctl"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -9,6 +9,8 @@ edition = "2021"
 windows = { version = "0", features = ["Devices_Sensors"] }
 tokio = { version = "1", features = ["full"] }
 vigem-client = { git = "https://github.com/Originalimoc/vigem-sdk-mc", features = ["unstable_xtarget_notification"] }
+rusty-xinput = "1"
+
 #vigem = { git = "https://github.com/TheRadioGuy/vigem" }
 
 [profile.release]
