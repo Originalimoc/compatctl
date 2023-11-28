@@ -5,8 +5,7 @@ Unify input and convert controller type, currently emulating DS4 via ViGEmBus
 Legion Go
 
 # Todo
-Vibration relay
-DirectInput(No existing working lib)
+DirectInput(For more button, but no existing working lib)
 
 # Build and Run
 Just `cargo build --release` on Windows(or use target), need ViGEmBus driver to run.
