@@ -1,12 +1,25 @@
-use std::sync::{Mutex, Arc};
+use std::sync::{Mutex, Arc, OnceLock};
 use std::time::Duration;
 use windows::Devices::Sensors::{Accelerometer, Gyrometer};
-use vigem_client::{DS4ReportExBuilder, DS4Buttons, DS4SpecialButtons};
+use vigem_client::{DS4ReportExBuilder, DS4Buttons, DS4SpecialButtons, DS4Status};
 use rusty_xinput as xi;
 use xi::XInputState;
+use tokio::sync::Semaphore;
+
+static ENABLE_DS4_SHARE_BUTTON: OnceLock<bool> = OnceLock::new();
 
 #[tokio::main]
 async fn main() {
+    for arg in std::env::args() {
+        if arg.contains("--enable-share-button") {
+            ENABLE_DS4_SHARE_BUTTON.get_or_init(|| {
+                true
+            });
+        }
+    }
+    ENABLE_DS4_SHARE_BUTTON.get_or_init(|| {
+        false
+    });
     let Ok(vigem_driver_client) = vigem_client::Client::connect() else {
         eprintln!("Failed to connect to ViGEm Bus");
         return;
@@ -69,9 +82,11 @@ async fn main() {
     let accel_data_g: Arc<Mutex<AccelData>> = Arc::new(Mutex::new(AccelData::default()));
 
     let xstate_in = Arc::clone(&xstate_g);
+    let input_available = Arc::new(Semaphore::new(3));
+    let input_available_xstate_source = Arc::clone(&input_available);
     std::thread::spawn(move || {
         loop {
-            *xstate_in.lock().expect("Unknown error 1") = match xi_handle.get_state(0) {
+            *xstate_in.lock().expect("Unknown lock error 1") = match xi_handle.get_state(0) {
                 Ok(s) => {
                     Some(s)
                 }
@@ -81,30 +96,43 @@ async fn main() {
                     None
                 }
             };
+            input_available_xstate_source.add_permits(1);
             std::thread::sleep(Duration::from_millis(4)); // 250 Hz
         }
     });
 
     let gyro_data_in = Arc::clone(&gyro_data_g);
+    let input_available_gyro_source = Arc::clone(&input_available);
     std::thread::spawn(move || {
         loop {
             let gyro_data = read_gyro(&gyro).unwrap_or_default();
             let gyro_data = legion_go_gyro_axis_swap(gyro_data);
-            (*gyro_data_in.lock().expect("Unknown error 1")).update(gyro_data);
+            (*gyro_data_in.lock().expect("Unknown lock error 2")).update(gyro_data);
+            input_available_gyro_source.add_permits(1);
         }
     });
 
     let accel_data_in = Arc::clone(&accel_data_g);
+    let input_available_accel_source = Arc::clone(&input_available);
     std::thread::spawn(move || {
         loop {
             let accel_data = read_accel(&accel).unwrap_or_default();
             let accel_data = legion_go_accel_axis_swap(accel_data);
-            (*accel_data_in.lock().expect("Unknown error 1")).update(accel_data);
+            (*accel_data_in.lock().expect("Unknown lock error 3")).update(accel_data);
+            input_available_accel_source.add_permits(1);
         }
     });
 
     println!("Service started");
     loop {
+        let input_permit = match input_available.acquire().await {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("Unknown error 1: {}", e);
+                std::process::exit(-1);
+            }
+        };
+        input_permit.forget();
         let xstate: Option<XInputState> = *xstate_g.lock().expect("Input process crashed");
         let gyro_data = *gyro_data_g.lock().expect("Input process crashed");
         let accel_data = *accel_data_g.lock().expect("Input process crashed");
@@ -117,10 +145,10 @@ async fn main() {
             .accel_x(convert_umdf_accel_to_dualshock(accel_data.x))
             .accel_y(convert_umdf_accel_to_dualshock(accel_data.y))
             .accel_z(convert_umdf_accel_to_dualshock(accel_data.z))
+            .status(DS4Status::with_battery_status(vigem_client::BatteryStatus::Full))
             .build();
         
         let _ = ds4wired.update_ex(&report);
-        std::thread::sleep(Duration::from_millis(4));
     }
 }
 
@@ -140,6 +168,12 @@ fn put_xinput_state_into_builder(xstate: Option<XInputState>, ds4reb: DS4ReportE
             .trigger_left(xstate.left_trigger_bool())
             .trigger_right(xstate.right_trigger_bool());
 
+        let buttons = if *ENABLE_DS4_SHARE_BUTTON.get().unwrap_or(&false) {
+            buttons.share(xstate.start_button())
+        } else {
+            buttons
+        };
+
         let special_buttons = DS4SpecialButtons::new()
             .touchpad(xstate.start_button());
 
@@ -154,7 +188,6 @@ fn put_xinput_state_into_builder(xstate: Option<XInputState>, ds4reb: DS4ReportE
             .thumb_ry(normalize_i16_to_u8(ry, true))
             .trigger_l(xstate.left_trigger())
             .trigger_r(xstate.right_trigger())
-
     } else {
         ds4reb
     }
