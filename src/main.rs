@@ -35,7 +35,7 @@ async fn main() {
     }
 
     let xi_handle = match xi::XInputHandle::load_default() {
-        Ok(h) => h,
+        Ok(h) => Arc::new(h),
         Err(e) => {
             eprintln!("Init XInput error: {:?}", e);
             return;
@@ -81,12 +81,14 @@ async fn main() {
     let gyro_data_g: Arc<Mutex<GyroData>> = Arc::new(Mutex::new(GyroData::default()));
     let accel_data_g: Arc<Mutex<AccelData>> = Arc::new(Mutex::new(AccelData::default()));
 
-    let xstate_in = Arc::clone(&xstate_g);
     let input_available = Arc::new(Semaphore::new(3));
+
+    let xstate_in = Arc::clone(&xstate_g);
+    let xi_handle_state_get = Arc::clone(&xi_handle);
     let input_available_xstate_source = Arc::clone(&input_available);
     std::thread::spawn(move || {
         loop {
-            *xstate_in.lock().expect("Unknown lock error 1") = match xi_handle.get_state(0) {
+            *xstate_in.lock().expect("Unknown lock error 1") = match xi_handle_state_get.get_state(0) {
                 Ok(s) => {
                     Some(s)
                 }
@@ -120,6 +122,18 @@ async fn main() {
             let accel_data = legion_go_accel_axis_swap(accel_data);
             (*accel_data_in.lock().expect("Unknown lock error 3")).update(accel_data);
             input_available_accel_source.add_permits(1);
+        }
+    });
+
+    let xi_handle_state_set = Arc::clone(&xi_handle);
+
+    ds4wired.request_notification().expect("already attached").spawn_thread(move |_, report| {
+        let (mut lms, mut rms): (u16, u16) = (report.large_motor as u16, report.small_motor as u16);
+        lms *= 257;
+        rms *= 257;
+        if let Err(e) = xi_handle_state_set.set_state(0, lms, rms) {
+            println!("No XInput device found for rumble, retrying: {:?}", e);
+            std::thread::sleep(Duration::from_millis(333));
         }
     });
 
