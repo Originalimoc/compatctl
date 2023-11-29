@@ -88,7 +88,7 @@ async fn main() {
     let input_available_xstate_source = Arc::clone(&input_available);
     std::thread::spawn(move || {
         loop {
-            *xstate_in.lock().expect("Unknown lock error 1") = match xi_handle_state_get.get_state(0) {
+            *xstate_in.lock().expect("Unknown lock error 1") = match xi_handle_state_get.get_state_ex(0) {
                 Ok(s) => {
                     Some(s)
                 }
@@ -99,7 +99,7 @@ async fn main() {
                 }
             };
             input_available_xstate_source.add_permits(1);
-            std::thread::sleep(Duration::from_millis(4)); // 250 Hz
+            std::thread::sleep(Duration::from_millis(3));
         }
     });
 
@@ -189,7 +189,8 @@ fn put_xinput_state_into_builder(xstate: Option<XInputState>, ds4reb: DS4ReportE
         };
 
         let special_buttons = DS4SpecialButtons::new()
-            .touchpad(xstate.start_button());
+            .touchpad(xstate.start_button())
+            .ps_home(xstate.guide_button());
 
         let (lx, ly) = xstate.left_stick_raw();
         let (rx, ry) = xstate.right_stick_raw();
