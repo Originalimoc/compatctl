@@ -1,25 +1,25 @@
-use std::sync::{Mutex, Arc, OnceLock};
+use std::sync::OnceLock;
 use std::time::Duration;
 use windows::Devices::Sensors::{Accelerometer, Gyrometer};
 use vigem_client::{DS4ReportExBuilder, DS4Buttons, DS4SpecialButtons, DS4Status};
 use rusty_xinput as xi;
 use xi::XInputState;
-use tokio::sync::Semaphore;
+use tokio::sync::mpsc;
 
 static ENABLE_DS4_SHARE_BUTTON: OnceLock<bool> = OnceLock::new();
+
+const GYRO_SCALE_FACTOR: f64 = 50.0; // Adjust as needed
+const ACCEL_SCALE_FACTOR: f64 = 8560.0; // DS4 accel is about -4g to 4g
 
 #[tokio::main]
 async fn main() {
     for arg in std::env::args() {
         if arg.contains("--enable-share-button") {
-            ENABLE_DS4_SHARE_BUTTON.get_or_init(|| {
-                true
-            });
+            ENABLE_DS4_SHARE_BUTTON.get_or_init(|| true);
         }
     }
-    ENABLE_DS4_SHARE_BUTTON.get_or_init(|| {
-        false
-    });
+    ENABLE_DS4_SHARE_BUTTON.get_or_init(|| false);
+
     let Ok(vigem_driver_client) = vigem_client::Client::connect() else {
         eprintln!("Failed to connect to ViGEm Bus");
         return;
@@ -35,102 +35,76 @@ async fn main() {
     }
 
     let xi_handle = match xi::XInputHandle::load_default() {
-        Ok(h) => Arc::new(h),
+        Ok(h) => std::sync::Arc::new(h),
         Err(e) => {
             eprintln!("Init XInput error: {:?}", e);
             return;
         }
     };
 
-    print!("Getting gyro device... ");
     let gyro = match Gyrometer::GetDefault() {
-        Ok(gyro) => {
-            println!("Ok");
-            gyro
-        },
+        Ok(gyro) => gyro,
         Err(e) => {
-            if e.code().0 == 0 {
-                println!("Failed");
-                eprintln!("No gyro found");
-            } else {
-                println!("Failed");
-                eprintln!("Get gyro error: {}", e);
-            }
+            eprintln!("Get gyro error: {}", e);
             return;
         }
     };
-    print!("Getting accelerometer device... ");
     let accel = match Accelerometer::GetDefault() {
-        Ok(accel) => {
-            println!("Ok");
-            accel
-        },
+        Ok(accel) => accel,
         Err(e) => {
-            if e.code().0 == 0 {
-                println!("Failed");
-                eprintln!("No accelerometer found");
-            } else {
-                println!("Failed");
-                eprintln!("Get accelerometer error: {}", e);
-            }
+            eprintln!("Get accelerometer error: {}", e);
             return;
         }
     };
 
-    let xstate_g: Arc<Mutex<Option<XInputState>>> = Arc::new(Mutex::new(None));
-    let gyro_data_g: Arc<Mutex<GyroData>> = Arc::new(Mutex::new(GyroData::default()));
-    let accel_data_g: Arc<Mutex<AccelData>> = Arc::new(Mutex::new(AccelData::default()));
+    let (xstate_tx, mut xstate_rx) = mpsc::channel::<Option<XInputState>>(3);
+    let (gyro_tx, mut gyro_rx) = mpsc::channel::<GyroData>(3);
+    let (accel_tx, mut accel_rx) = mpsc::channel::<AccelData>(3);
 
-    let input_available = Arc::new(Semaphore::new(3));
-
-    let xstate_in = Arc::clone(&xstate_g);
-    let xi_handle_state_get = Arc::clone(&xi_handle);
-    let input_available_xstate_source = Arc::clone(&input_available);
-    std::thread::spawn(move || {
+    let xi_handle_state_get = std::sync::Arc::clone(&xi_handle);
+    tokio::spawn(async move {
         loop {
-            *xstate_in.lock().expect("Unknown lock error 1") = match xi_handle_state_get.get_state_ex(0) {
-                Ok(s) => {
-                    Some(s)
-                }
+            let xstate = match xi_handle_state_get.get_state_ex(0) {
+                Ok(s) => Some(s),
                 Err(e) => {
                     println!("No XInput device found, retrying: {:?}", e);
-                    std::thread::sleep(Duration::from_millis(333));
+                    tokio::time::sleep(Duration::from_millis(333)).await;
                     None
                 }
             };
-            input_available_xstate_source.add_permits(1);
-            std::thread::sleep(Duration::from_millis(3));
+            if xstate_tx.send(xstate).await.is_err() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(3)).await;
         }
     });
 
-    let gyro_data_in = Arc::clone(&gyro_data_g);
-    let input_available_gyro_source = Arc::clone(&input_available);
-    std::thread::spawn(move || {
+    tokio::spawn(async move {
         loop {
-            let gyro_data = read_gyro(&gyro).unwrap_or_default();
-            let gyro_data = legion_go_gyro_axis_swap(gyro_data);
-            (*gyro_data_in.lock().expect("Unknown lock error 2")).update(gyro_data);
-            input_available_gyro_source.add_permits(1);
+            let mut gyro_data = read_gyro(&gyro).unwrap_or_default();
+            gyro_data = legion_go_gyro_axis_swap(gyro_data);
+
+            if gyro_tx.send(gyro_data).await.is_err() {
+                break;
+            }
         }
     });
 
-    let accel_data_in = Arc::clone(&accel_data_g);
-    let input_available_accel_source = Arc::clone(&input_available);
-    std::thread::spawn(move || {
+    tokio::spawn(async move {
         loop {
-            let accel_data = read_accel(&accel).unwrap_or_default();
-            let accel_data = legion_go_accel_axis_swap(accel_data);
-            (*accel_data_in.lock().expect("Unknown lock error 3")).update(accel_data);
-            input_available_accel_source.add_permits(1);
+            let mut accel_data = read_accel(&accel).unwrap_or_default();
+            accel_data = legion_go_accel_axis_swap(accel_data);
+
+            if accel_tx.send(accel_data).await.is_err() {
+                break;
+            }
         }
     });
 
-    let xi_handle_state_set = Arc::clone(&xi_handle);
-
+    let xi_handle_state_set = std::sync::Arc::clone(&xi_handle);
     ds4wired.request_notification().expect("already attached").spawn_thread(move |_, report| {
-        let (mut lms, mut rms): (u16, u16) = (report.large_motor as u16, report.small_motor as u16);
-        lms *= 257;
-        rms *= 257;
+        let (lms, rms): (u16, u16) = (report.large_motor as u16, report.small_motor as u16);
+        let (lms, rms) = (lms * 257, rms * 257);
         if let Err(e) = xi_handle_state_set.set_state(0, lms, rms) {
             println!("No XInput device found for rumble, retrying: {:?}", e);
             std::thread::sleep(Duration::from_millis(333));
@@ -138,31 +112,46 @@ async fn main() {
     });
 
     println!("Service started");
-    loop {
-        let input_permit = match input_available.acquire().await {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("Unknown error 1: {}", e);
-                std::process::exit(-1);
-            }
-        };
-        input_permit.forget();
-        let xstate: Option<XInputState> = *xstate_g.lock().expect("Input process crashed");
-        let gyro_data = *gyro_data_g.lock().expect("Input process crashed");
-        let accel_data = *accel_data_g.lock().expect("Input process crashed");
 
-        let report = put_xinput_state_into_builder(xstate, DS4ReportExBuilder::new());
-        let report = report
-            .gyro_x(convert_umdf_gyro_to_dualshock(gyro_data.x))
-            .gyro_y(convert_umdf_gyro_to_dualshock(gyro_data.y))
-            .gyro_z(convert_umdf_gyro_to_dualshock(gyro_data.z))
-            .accel_x(convert_umdf_accel_to_dualshock(accel_data.x))
-            .accel_y(convert_umdf_accel_to_dualshock(accel_data.y))
-            .accel_z(convert_umdf_accel_to_dualshock(accel_data.z))
+    let mut timestamp: u16 = 0;
+    let mut last_update_time = quanta::Instant::now();
+
+    loop {
+        let xstate = xstate_rx.recv().await.unwrap_or(None);
+        let gyro_data = gyro_rx.recv().await.unwrap_or_default();
+        let accel_data = accel_rx.recv().await.unwrap_or_default();
+
+        // Convert gyro data to scaled DS4 gyro values
+        let gyro_x = (gyro_data.x * GYRO_SCALE_FACTOR) as i16;
+        let gyro_y = (gyro_data.y * GYRO_SCALE_FACTOR) as i16;
+        let gyro_z = (gyro_data.z * GYRO_SCALE_FACTOR) as i16;
+
+        // Convert accel data to scaled DS4 accel values
+        let accel_x = (accel_data.x * ACCEL_SCALE_FACTOR) as i16;
+        let accel_y = (accel_data.y * ACCEL_SCALE_FACTOR) as i16;
+        let accel_z = (accel_data.z * ACCEL_SCALE_FACTOR) as i16;
+
+        let report = put_xinput_state_into_builder(xstate, DS4ReportExBuilder::new())
+            .gyro_x(gyro_x)
+            .gyro_y(gyro_y)
+            .gyro_z(gyro_z)
+            .accel_x(accel_x)
+            .accel_y(accel_y)
+            .accel_z(accel_z)
+            .timestamp(timestamp)
             .status(DS4Status::with_battery_status(vigem_client::BatteryStatus::Full))
             .build();
-        
+
         let _ = ds4wired.update_ex(&report);
+
+        let now = quanta::Instant::now();
+        let elapsed = now - last_update_time;
+        last_update_time = now;
+
+        // Calculate the timestamp increment proportionally to 1.25ms per 188 units.
+        let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
+        let timestamp_increment = (elapsed_ms * (188.0 / 1.25)).round() as u16;
+        timestamp = timestamp.wrapping_add(timestamp_increment);
     }
 }
 
@@ -230,77 +219,39 @@ fn map_dpad_directions(up: bool, down: bool, left: bool, right: bool) -> vigem_c
     }
 }
 
-fn convert_umdf_gyro_to_dualshock(umdf_value: f64) -> i16 {
-    const SCALE_FACTOR: f64 = 20000.0;
-
-    // Define the expected maximum value from the UMDF sensor
-    let umdf_max: f64 = 500.0;
-
-    // Clamp the umdf_value between -umdf_max and umdf_max
-    let clamped_value = umdf_value.clamp(-umdf_max, umdf_max);
-
-    // Now scale the clamped value to fit in the i16 range
-    // We divide by UMDF's max to normalize it to a -1.0 to 1.0 range,
-    // then we multiply by the maximum value i16 can hold.
-    let scaled_value = clamped_value / umdf_max * SCALE_FACTOR;
-
-    // Since i16 cannot hold fractional parts, we need to cast to i16
-    // We use round to convert to the nearest integer to maintain as much precision as possible.
-    scaled_value.round() as i16
-}
-
-fn convert_umdf_accel_to_dualshock(umdf_value: f64) -> i16 {
-    const SCALE_FACTOR: f64 = 31900.0;
-    let umdf_max: f64 = 4.2;
-    let clamped_value = umdf_value.clamp(-umdf_max, umdf_max);
-    let scaled_value = clamped_value / umdf_max * SCALE_FACTOR;
-    scaled_value.round() as i16
-}
-
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct GyroData {
     x: f64,
     y: f64,
     z: f64,
 }
-impl Default for GyroData {
-    fn default() -> Self {
-        GyroData {
-            x: 0.0,
-            y: 0.0,
-            z: 0.0,
+
+impl std::ops::Add for GyroData {
+    type Output = Self;
+    fn add(self, other: Self) -> Self {
+        Self {
+            x: self.x + other.x,
+            y: self.y + other.y,
+            z: self.z + other.z,
         }
     }
 }
-impl GyroData {
-    fn update(&mut self, data: GyroData) {
-        self.x = data.x;
-        self.y = data.y;
-        self.z = data.z;
+impl std::ops::Div<f64> for GyroData {
+    type Output = Self;
+    fn div(self, rhs: f64) -> Self::Output {
+        Self {
+            x: self.x / rhs,
+            y: self.y / rhs,
+            z: self.z / rhs,
+        }
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct AccelData {
     x: f64,
     y: f64,
     z: f64,
-}
-impl Default for AccelData {
-    fn default() -> Self {
-        AccelData {
-            x: 0.983,
-            y: 0.001,
-            z: 0.001,
-        }
-    }
-}
-impl AccelData {
-    fn update(&mut self, data: AccelData) {
-        self.x = data.x;
-        self.y = data.y;
-        self.z = data.z;
-    }
 }
 
 fn legion_go_gyro_axis_swap(raw: GyroData) -> GyroData {
