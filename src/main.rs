@@ -3,13 +3,11 @@ use std::time::Duration;
 use windows::Devices::Sensors::{Accelerometer, Gyrometer};
 use vigem_client::{DS4ReportExBuilder, DS4Buttons, DS4SpecialButtons, DS4Status};
 use rusty_xinput as xi;
+use std::sync::{Arc, Mutex};
+use tokio::time::interval;
 use xi::XInputState;
-use tokio::sync::mpsc;
 
 static ENABLE_DS4_SHARE_BUTTON: OnceLock<bool> = OnceLock::new();
-
-const GYRO_SCALE_FACTOR: f64 = 50.0; // Adjust as needed
-const ACCEL_SCALE_FACTOR: f64 = 8560.0; // DS4 accel is about -4g to 4g
 
 #[tokio::main]
 async fn main() {
@@ -57,46 +55,69 @@ async fn main() {
         }
     };
 
-    let (xstate_tx, mut xstate_rx) = mpsc::channel::<Option<XInputState>>(3);
-    let (gyro_tx, mut gyro_rx) = mpsc::channel::<GyroData>(3);
-    let (accel_tx, mut accel_rx) = mpsc::channel::<AccelData>(3);
+    let xstate_mutex = Arc::new(Mutex::new(None));
+    let gyro_mutex = Arc::new(Mutex::new(GyroData::default()));
+    let accel_mutex = Arc::new(Mutex::new(AccelData::default()));
 
     let xi_handle_state_get = std::sync::Arc::clone(&xi_handle);
+    let xstate_mutex_clone = Arc::clone(&xstate_mutex);
     tokio::spawn(async move {
         loop {
             let xstate = match xi_handle_state_get.get_state_ex(0) {
                 Ok(s) => Some(s),
                 Err(e) => {
                     println!("No XInput device found, retrying: {:?}", e);
-                    tokio::time::sleep(Duration::from_millis(333)).await;
                     None
                 }
             };
-            if xstate_tx.send(xstate).await.is_err() {
-                break;
+            {
+                let mut locked_xstate = xstate_mutex_clone.lock().unwrap();
+                *locked_xstate = xstate;
             }
-            tokio::time::sleep(Duration::from_millis(3)).await;
+            tokio::time::sleep(Duration::from_millis(2)).await;
         }
     });
 
+    let gyro_mutex_clone = Arc::clone(&gyro_mutex);
     tokio::spawn(async move {
+        let inertia = 10.0;
+        let mut previous_non_error_reading = GyroData::default();
+        let mut broken_time = 0.0;
         loop {
-            let mut gyro_data = read_gyro(&gyro).unwrap_or_default();
-            gyro_data = legion_go_gyro_axis_swap(gyro_data);
-
-            if gyro_tx.send(gyro_data).await.is_err() {
-                break;
+            let mut og_gyro_data = read_gyro(&gyro).unwrap_or_default();
+            og_gyro_data = legion_go_gyro_axis_swap(og_gyro_data);
+            let x_is_broken = og_gyro_data.x < -124.1;
+            let y_is_broken = og_gyro_data.y < -124.1;
+            let z_is_broken = og_gyro_data.z < -124.1;
+            let new_gyro_data = if x_is_broken || y_is_broken || z_is_broken {
+                broken_time += 1.0;
+                let previous_x_positive = previous_non_error_reading.x > 0.0;
+                let previous_y_positive = previous_non_error_reading.y > 0.0;
+                let previous_z_positive = previous_non_error_reading.z > 0.0;
+                let workarounded_x = if x_is_broken { if previous_x_positive { 124.4 + inertia * broken_time } else { -124.4 - inertia * broken_time } } else { og_gyro_data.x };
+                let workarounded_y = if y_is_broken { if previous_y_positive { 124.4 + inertia * broken_time } else { -124.4 - inertia * broken_time } } else { og_gyro_data.y };
+                let workarounded_z = if z_is_broken { if previous_z_positive { 124.4 + inertia * broken_time } else { -124.4 - inertia * broken_time } } else { og_gyro_data.z };
+                GyroData { x: workarounded_x, y: workarounded_y, z: workarounded_z }
+            } else {
+                broken_time = 0.0;
+                previous_non_error_reading = og_gyro_data;
+                og_gyro_data
+            };
+            {
+                let mut locked_gyro = gyro_mutex_clone.lock().unwrap();
+                *locked_gyro = new_gyro_data;
             }
         }
     });
 
+    let accel_mutex_clone = Arc::clone(&accel_mutex);
     tokio::spawn(async move {
         loop {
             let mut accel_data = read_accel(&accel).unwrap_or_default();
             accel_data = legion_go_accel_axis_swap(accel_data);
-
-            if accel_tx.send(accel_data).await.is_err() {
-                break;
+            {
+                let mut locked_accel = accel_mutex_clone.lock().unwrap();
+                *locked_accel = accel_data;
             }
         }
     });
@@ -114,44 +135,38 @@ async fn main() {
     println!("Service started");
 
     let mut timestamp: u16 = 0;
-    let mut last_update_time = quanta::Instant::now();
+    let mut interval = interval(Duration::from_micros(1250));
 
     loop {
-        let xstate = xstate_rx.recv().await.unwrap_or(None);
-        let gyro_data = gyro_rx.recv().await.unwrap_or_default();
-        let accel_data = accel_rx.recv().await.unwrap_or_default();
+        interval.tick().await;
 
-        // Convert gyro data to scaled DS4 gyro values
-        let gyro_x = (gyro_data.x * GYRO_SCALE_FACTOR) as i16;
-        let gyro_y = (gyro_data.y * GYRO_SCALE_FACTOR) as i16;
-        let gyro_z = (gyro_data.z * GYRO_SCALE_FACTOR) as i16;
-
-        // Convert accel data to scaled DS4 accel values
-        let accel_x = (accel_data.x * ACCEL_SCALE_FACTOR) as i16;
-        let accel_y = (accel_data.y * ACCEL_SCALE_FACTOR) as i16;
-        let accel_z = (accel_data.z * ACCEL_SCALE_FACTOR) as i16;
+        let xstate = {
+            let locked_xstate = xstate_mutex.lock().unwrap();
+            *locked_xstate
+        };
+        let gyro_data = {
+            let locked_gyro = gyro_mutex.lock().unwrap();
+            *locked_gyro
+        };
+        let accel_data = {
+            let locked_accel = accel_mutex.lock().unwrap();
+            *locked_accel
+        };
 
         let report = put_xinput_state_into_builder(xstate, DS4ReportExBuilder::new())
-            .gyro_x(gyro_x)
-            .gyro_y(gyro_y)
-            .gyro_z(gyro_z)
-            .accel_x(accel_x)
-            .accel_y(accel_y)
-            .accel_z(accel_z)
+            .gyro_x(convert_umdf_gyro_to_dualshock_x(gyro_data.x))
+            .gyro_y(convert_umdf_gyro_to_dualshock_y(gyro_data.y))
+            .gyro_z(convert_umdf_gyro_to_dualshock_z(gyro_data.z))
+            .accel_x(convert_umdf_accel_to_dualshock(accel_data.x))
+            .accel_y(convert_umdf_accel_to_dualshock(accel_data.y))
+            .accel_z(convert_umdf_accel_to_dualshock(accel_data.z))
             .timestamp(timestamp)
             .status(DS4Status::with_battery_status(vigem_client::BatteryStatus::Full))
             .build();
 
         let _ = ds4wired.update_ex(&report);
 
-        let now = quanta::Instant::now();
-        let elapsed = now - last_update_time;
-        last_update_time = now;
-
-        // Calculate the timestamp increment proportionally to 1.25ms per 188 units.
-        let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
-        let timestamp_increment = (elapsed_ms * (188.0 / 1.25)).round() as u16;
-        timestamp = timestamp.wrapping_add(timestamp_increment);
+        timestamp = timestamp.wrapping_add(188);
     }
 }
 
@@ -219,6 +234,57 @@ fn map_dpad_directions(up: bool, down: bool, left: bool, right: bool) -> vigem_c
     }
 }
 
+fn convert_umdf_gyro_to_dualshock_x(umdf_value: f64) -> i16 {
+    let scale: f64 = 1.0f64;
+    let intermediate_value = convert_umdf_gyro_to_dualshock(umdf_value) as f64 * scale;
+     // Define i16 min and max to avoid magic numbers
+    const I16_MAX: f64 = 32767.0;
+    const I16_MIN: f64 = -32768.0;
+    intermediate_value.clamp(I16_MIN, I16_MAX) as i16
+}
+fn convert_umdf_gyro_to_dualshock_y(umdf_value: f64) -> i16 {
+    let scale: f64 = 1.0f64;
+    let intermediate_value = convert_umdf_gyro_to_dualshock(umdf_value) as f64 * scale;
+     // Define i16 min and max to avoid magic numbers
+    const I16_MAX: f64 = 32767.0;
+    const I16_MIN: f64 = -32768.0;
+    intermediate_value.clamp(I16_MIN, I16_MAX) as i16
+}
+fn convert_umdf_gyro_to_dualshock_z(umdf_value: f64) -> i16 {
+    let scale: f64 = 1.0f64;
+    let intermediate_value = convert_umdf_gyro_to_dualshock(umdf_value) as f64 * scale;
+     // Define i16 min and max to avoid magic numbers
+    const I16_MAX: f64 = 32767.0;
+    const I16_MIN: f64 = -32768.0;
+    intermediate_value.clamp(I16_MIN, I16_MAX) as i16
+}
+fn convert_umdf_gyro_to_dualshock(umdf_value: f64) -> i16 {
+    // Define the maximum angular velocity representable by the DualShock 4 gyro.
+    const MAX_DPS: f64 = 2000.0;
+    // Define i16 min and max to avoid magic numbers
+    const I16_MAX: f64 = 32767.0;
+    const I16_MIN: f64 = -32768.0;
+
+    // 1. Clamping
+    let clamped_value = umdf_value.clamp(-MAX_DPS, MAX_DPS);
+
+    // 2. Scaling and 3. Rounding and Type Conversion
+    // Calculate the sensitivity.  We are going from degrees/second to i16.
+    let scale_factor: f64 = I16_MAX / MAX_DPS;
+    let scaled_value = (clamped_value * scale_factor).round();
+
+    //clamp to i16 range, cast to i16 and return.
+    scaled_value.clamp(I16_MIN, I16_MAX) as i16
+}
+
+fn convert_umdf_accel_to_dualshock(umdf_value: f64) -> i16 {
+    const SCALE_FACTOR: f64 = 84626.0;
+    let umdf_max: f64 = 9.8;
+    let clamped_value = umdf_value.clamp(-umdf_max, umdf_max);
+    let scaled_value = clamped_value / umdf_max * SCALE_FACTOR;
+    scaled_value.round() as i16
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct GyroData {
     x: f64,
@@ -272,11 +338,12 @@ fn legion_go_accel_axis_swap(raw: AccelData) -> AccelData {
 
 fn read_gyro(device: &Gyrometer) -> windows::core::Result<GyroData> {
     let reading = device.GetCurrentReading()?;
-    Ok(GyroData {
+    let data = GyroData {
         x: reading.AngularVelocityX().unwrap_or(0.0),
         y: reading.AngularVelocityY().unwrap_or(0.0),
         z: reading.AngularVelocityZ().unwrap_or(0.0),
-    })
+    };
+    Ok(data)
 }
 
 fn read_accel(device: &Accelerometer) -> windows::core::Result<AccelData> {
