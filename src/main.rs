@@ -80,15 +80,15 @@ async fn main() {
 
     let gyro_mutex_clone = Arc::clone(&gyro_mutex);
     tokio::spawn(async move {
-        let inertia = 10.0;
+        let inertia = 0.0;
         let mut previous_non_error_reading = GyroData::default();
         let mut broken_time = 0.0;
         loop {
             let mut og_gyro_data = read_gyro(&gyro).unwrap_or_default();
             og_gyro_data = legion_go_gyro_axis_swap(og_gyro_data);
-            let x_is_broken = og_gyro_data.x < -124.1;
-            let y_is_broken = og_gyro_data.y < -124.1;
-            let z_is_broken = og_gyro_data.z < -124.1;
+            let x_is_broken = og_gyro_data.x.abs() > 124.1;
+            let y_is_broken = og_gyro_data.y.abs() > 124.1;
+            let z_is_broken = og_gyro_data.z.abs() > 124.1;
             let new_gyro_data = if x_is_broken || y_is_broken || z_is_broken {
                 broken_time += 1.0;
                 let previous_x_positive = previous_non_error_reading.x > 0.0;
