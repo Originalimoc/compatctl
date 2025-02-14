@@ -94,9 +94,9 @@ async fn main() {
                 let previous_x_positive = previous_non_error_reading.x > 0.0;
                 let previous_y_positive = previous_non_error_reading.y > 0.0;
                 let previous_z_positive = previous_non_error_reading.z > 0.0;
-                let workarounded_x = if x_is_broken { if previous_x_positive { 124.4 + inertia * broken_time } else { -124.4 - inertia * broken_time } } else { og_gyro_data.x };
-                let workarounded_y = if y_is_broken { if previous_y_positive { 124.4 + inertia * broken_time } else { -124.4 - inertia * broken_time } } else { og_gyro_data.y };
-                let workarounded_z = if z_is_broken { if previous_z_positive { 124.4 + inertia * broken_time } else { -124.4 - inertia * broken_time } } else { og_gyro_data.z };
+                let workarounded_x = if x_is_broken { if previous_x_positive { 150.0 + inertia * broken_time } else { -150.0 - inertia * broken_time } } else { og_gyro_data.x };
+                let workarounded_y = if y_is_broken { if previous_y_positive { 150.0 + inertia * broken_time } else { -150.0 - inertia * broken_time } } else { og_gyro_data.y };
+                let workarounded_z = if z_is_broken { if previous_z_positive { 150.0 + inertia * broken_time } else { -150.0 - inertia * broken_time } } else { og_gyro_data.z };
                 GyroData { x: workarounded_x, y: workarounded_y, z: workarounded_z }
             } else {
                 broken_time = 0.0;
@@ -243,7 +243,7 @@ fn convert_umdf_gyro_to_dualshock_x(umdf_value: f64) -> i16 {
     intermediate_value.clamp(I16_MIN, I16_MAX) as i16
 }
 fn convert_umdf_gyro_to_dualshock_y(umdf_value: f64) -> i16 {
-    let scale: f64 = 1.0f64;
+    let scale: f64 = 1.1f64;
     let intermediate_value = convert_umdf_gyro_to_dualshock(umdf_value) as f64 * scale;
      // Define i16 min and max to avoid magic numbers
     const I16_MAX: f64 = 32767.0;
