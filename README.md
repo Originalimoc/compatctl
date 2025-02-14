@@ -1,4 +1,4 @@
-# compatctl
+# compatctl - Legion Go -> Dualshock 4 adaptor
 Unify input and convert controller type, currently emulating DS4 via ViGEmBus
 
 # Supported device
@@ -12,7 +12,7 @@ Just `cargo build --release` on Windows(or use target)
 
 # Run
 Need ViGEmBus driver to run
-Support CLI argument --enable-share-button
+Support CLI argument --enable-share-button (Press `start`, which also mapped to Touchpad click)
 
 # Known issue
 Motion sensors stop working after device sleep, but SensorExplorer also stops reading data. So this is either a Lenovo or AMD driver problem, I can't fix it.
